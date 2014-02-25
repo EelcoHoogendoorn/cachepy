@@ -31,15 +31,9 @@ class ReadOnlyShelve(object):
         self.filename = filename
 
         self.shelve = Pickle.load(gzip.open(self.filename,'rb'))
-##        self.handle = open(filename, 'rb')
-##        self.keys = None
-##        self.value = None
 
     def __getitem__(self, key):
         return Pickle.loads(self.shelve[hashing(key)])
-##        i = np.searchsorted(self.keys, hash)
-##        value = self.values[i]
-##        return Pickle.loads(value)
 
 
     @staticmethod
@@ -53,16 +47,7 @@ class ReadOnlyShelve(object):
         values = np.array( [pickling(value) for value in values])
         assert np.unique(hashes).size == hashes.size, \
             'Holy shit, 256 bit hash collision! Make some superficial changes to your code to make this go away!'
-        Pickle.dump(dict(zip(hashes, values)), gzip.open(filename, 'wb'), protocol=-1)
-##        I = np.argsort(hashes)
-##
-##        values = np.array([pickling(value) for value in values])
-##
-##        keys   = keys[I]
-##        values = values[I]
-##
-##        handle = open(filename, 'wb')
-##        Pickle.dump((keys, values), handle, protocol=-1)
+        Pickle.dump(dict(zip(hashes, values)), gzip.open(filename, 'wb'), protocol=util.pickle_protocol)
 
 
 
