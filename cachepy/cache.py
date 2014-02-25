@@ -106,7 +106,7 @@ class Deferred(object):
 class Partial(object):
     """
     token denoting a partial key insertion into the shelve
-    rowid is the unique value where the preceeding part of the key can be found
+    rowid is the unique rowid value where the preceeding part of the key can be found
     """
     def __init__(self, rowid):
         self.rowid = rowid
@@ -289,7 +289,7 @@ if __name__=='__main__':
 ##    args = [('const {dtype} = {value};', dict(dtype='int',value=i)) for i in range(10)]
 
     #run multiple jobs concurrent as either processes or threads
-    threading=True
+    threading=False
     if threading:
         import multiprocessing.dummy as multiprocessing
     else:

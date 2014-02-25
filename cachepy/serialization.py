@@ -15,13 +15,15 @@ note that this code does not handle cyclic references, or reference equality
 im not sure its worthwhile to add support for this
 it sounds like a lot of work to add, and not much to ask of the end user not to use cyclic references
 and not to rely on the difference between reference and value equality in their keys
+
+would we like to use zlib in our encoding?
 """
 
 
 import hashlib
 import cPickle as Pickle
 import numpy as np
-
+import util
 
 import types
 #list of all types without any internal references; is this list complete?
@@ -29,7 +31,7 @@ flat_types = types.StringTypes +(types.BooleanType, types.BufferType, types.Floa
 
 
 def encode(obj):
-    return Pickle.dumps(obj, protocol=-1)
+    return Pickle.dumps(obj, protocol=util.pickle_protocol)    #protocol 2 is the highest protocol which is python2/3 cross compatible. but do we care?
 
 ##def decode(obj):
 ##    return Pickle.loads(str(obj))
@@ -51,56 +53,64 @@ class DeterministicDict(object):
     """
     wrapper class around dict to ensure it serializes in a determinstic manner
     """
-    __slots__ = ['keys', 'values']
-    def __init__(self, dict):
-        keys, values = dict.keys(), dict.values()
-        keystr = [deterministic_serialization(key) for key in keys]
-        order = np.argsort(keystr)
-        self.keys   = np.array(keys)[order].tolist()
-        self.values = np.array(values)[order].tolist()
+    __slots__ = ['keys', 'values','type']
+    def __init__(self, obj):
+        keys, values = obj.keys(), obj.values()
+        keystrs   = np.array([as_deterministic(key) for key in keys])
+        valuestrs = np.array([as_deterministic(value) for value in values])
+        order = np.argsort(keystrs)
+##        self.keys   = np.array(keys)[order].tolist()
+        self.keys   = keystrs  [order].tolist()     #since we dont care about unpickling our keys anyway...
+        self.values = valuestrs[order].tolist()
+        self.type   = type(obj)
 
 class DeterministicSet(object):
     """
     deterministic set object
     """
-    __slots__ = ['set']
-    def __init__(self, set):
-        keystr = [deterministic_serialization(key) for key in set]
-        order = np.argsort(keystr)
-        self.set   = np.array(set)[order].tolist()
+    __slots__ = ['set','type']
+    def __init__(self, obj):
+        keystr = [as_deterministic(key) for key in obj]
+        self.set = sorted(keystr)
+##        order = np.argsort(keystr)
+##        self.set   = np.array(set)[order].tolist()
+        self.type = type(obj)
 
+class UserDefinedType(object):
+    """dummy type to obtain a list of all members not associated with relevant state"""
+import inspect
+standard_members = [k for k,v in inspect.getmembers(UserDefinedType())]
 
 class DeterministicUserDefinedType(object):
     """
     a default serializer for user defined types
-    not sure how general this is...
-    data attributes starting with __ will be missed, for instance
+    almost seems too easy... are there gotchas im missing?
+    a key-value mapping and an associated type are basically all python objects are, no?
     """
     __slots__ = ['dict', 'type']
     def __init__(self, obj):
-        import inspect
-        self.dict = DeterministicDict(dict([(k,v) for k,v in inspect.getmembers(obj) if not k.startswith('__')]))
+        self.dict = DeterministicDict({k:v for k,v in inspect.getmembers(obj) if not k in standard_members})
         self.type = type(obj)
 
 
-def deterministic_serialization(obj):
+def as_deterministic(obj):
     """
-    recusive deterministic serialization
+    recusive mapping of object hierarchies to deterministic equivalents
     note; this is not safe against cyclic dependencies
 
     inspired by:
     http://stackoverflow.com/questions/985294/is-the-pickling-process-deterministic
     """
-    if isinstance(obj, flat_types):     #if the object does not contain internal references, we are happy
+    if isinstance(obj, flat_types):     #if the object does not contain internal references, we are happy as-is
         return obj
     if isinstance(obj, types.DictionaryType):
         return DeterministicDict(obj)
     if isinstance(obj, (set, frozenset)):
         return DeterministicSet(obj)
     if isinstance(obj, types.TupleType):
-        return tuple(deterministic_serialization(o) for o in obj)
+        return tuple(as_deterministic(o) for o in obj)
     elif isinstance(obj, types.ListType):
-        return [deterministic_serialization(o) for o in obj]
+        return [as_deterministic(o) for o in obj]
     else:
         return DeterministicUserDefinedType(obj)
 
@@ -111,7 +121,7 @@ if __name__=='__main__':
         a=3
         def __init__(self):
             self.b=4
-    key = (Dummy(), {3:4, 5:6})
-    q = deterministic_serialization()
+    key = (Dummy(), {3:4, 5:6})     #take a rather complex key
+    q = as_deterministic(key)
     print encode(q)
 

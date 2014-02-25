@@ -44,13 +44,16 @@ import os
 import tempfile
 import random
 import logging
-from cPickle import dumps, loads, HIGHEST_PROTOCOL as PICKLE_PROTOCOL
+from cPickle import dumps, loads
 from UserDict import DictMixin
 from Queue import Queue
 from threading import Thread
+import util
 
 import numpy as np
 import hashlib
+import zlib
+from serialization import as_deterministic
 
 
 logger = logging.getLogger('sqlitedict')
@@ -64,20 +67,25 @@ def open(*args, **kwargs):
 
 def encode(obj):
     """Serialize an object using pickle to a binary format accepted by SQLite."""
-    return sqlite3.Binary(dumps(obj, protocol=PICKLE_PROTOCOL))
+    strobj = dumps(obj, protocol=util.pickle_protocol)
+    return sqlite3.Binary(zlib.compress(strobj))
 
 
 def decode(obj):
     """Deserialize objects retrieved from SQLite."""
-    return loads(str(obj))
+    return loads(zlib.decompress(str(obj)))
+
+
+def hashing(strobj):
+    return hashlib.sha256(strobj).digest()
 
 def hash_str_to_u64(strobj):
-    return reduce(np.bitwise_xor, np.frombuffer(hashlib.sha256(strobj).digest(), dtype=np.uint64)) + 1
+    """is this desirable? maintaining a list of strings is hardly different than a list of numbers, given that sqlite3 uses variable length stuff anyway"""
+    return reduce(np.bitwise_xor, np.frombuffer(hashing(strobj), dtype=np.uint64)) + 1
 
-from serialization import deterministic_serialization
 
 def process_key(key):
-    dkey = deterministic_serialization(key)
+    dkey = as_deterministic(key)
     keystr = encode(dkey)
     keyhash = hash_str_to_u64(keystr)
     return keystr, keyhash

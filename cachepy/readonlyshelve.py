@@ -16,18 +16,21 @@ intended to be managed from within a Cache object, which defines its interaction
 import cPickle as Pickle
 import numpy as np
 import hashlib
+import serialization
+import gzip     #global zip of our cache may be worthwhile
+import util
 
 
 def pickling(obj):
-    return Pickle.dumps(obj, protocol=-1)
+    return Pickle.dumps(obj, protocol=util.pickle_protocol)
 def hashing(obj):
-    return hashlib.sha256(pickling(obj)).digest()
+    return hashlib.sha256(pickling(serialization.as_deterministic(obj))).digest()
 
 class ReadOnlyShelve(object):
     def __init__(self, filename):
         self.filename = filename
 
-        self.shelve = Pickle.load(open(self.filename,'rb'))
+        self.shelve = Pickle.load(gzip.open(self.filename,'rb'))
 ##        self.handle = open(filename, 'rb')
 ##        self.keys = None
 ##        self.value = None
@@ -40,15 +43,17 @@ class ReadOnlyShelve(object):
 
 
     @staticmethod
-    def build(shelve, filename):
+    def build(filename, items):
         """
-        build pycc cache from a dict-like and write it to a filename
+        build pycc cache from a key-values pair iterable and write it to a filename
         """
+        keys, values = zip(*items)
 
-        hashes = np.array( [hashing (key)   for key   in shelve.keys()])
-        values = np.array( [pickling(value) for value in shelve.values()])
-        assert np.unique(hashes).size == hashes.size, 'Holy shit, 256 bit hash collision! Make some superficial changes to your code to make this go away!'
-        Pickle.dump(dict(zip(hashes, values)), open(filename, 'wb'), protocol=-1)
+        hashes = np.array( [hashing (key)   for key   in keys])
+        values = np.array( [pickling(value) for value in values])
+        assert np.unique(hashes).size == hashes.size, \
+            'Holy shit, 256 bit hash collision! Make some superficial changes to your code to make this go away!'
+        Pickle.dump(dict(zip(hashes, values)), gzip.open(filename, 'wb'), protocol=-1)
 ##        I = np.argsort(hashes)
 ##
 ##        values = np.array([pickling(value) for value in values])
@@ -62,9 +67,19 @@ class ReadOnlyShelve(object):
 
 
 if __name__=='__main__':
+    #create some random junk data, including a nontrivial key
+    items = [('a', 4), ('b', 30), ('eelco',3)]
+    items.append((dict(a=3,b=4), 'value'))
+
     import tempfile
-    d = dict(a=4, b=30, eelco=3)
     filename = tempfile.mktemp()
-    ReadOnlyShelve.build(d, filename)
+    ReadOnlyShelve.build(filename, items)
     rs = ReadOnlyShelve(filename)
+
+    #lets see if this works:
     print rs['a']
+    d = dict(a=3,b=4)
+    print rs[d]
+    d = {'b':4,'a':3}
+    print rs[d]
+
