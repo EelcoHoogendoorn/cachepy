@@ -74,8 +74,11 @@ def decode(obj):
 def hash_str_to_u64(strobj):
     return reduce(np.bitwise_xor, np.frombuffer(hashlib.sha256(strobj).digest(), dtype=np.uint64)) + 1
 
+from serialization import deterministic_serialization
+
 def process_key(key):
-    keystr = encode(key)
+    dkey = deterministic_serialization(key)
+    keystr = encode(dkey)
     keyhash = hash_str_to_u64(keystr)
     return keystr, keyhash
 
