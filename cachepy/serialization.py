@@ -25,7 +25,7 @@ perhaps we may even want to implement our own serialization inspired by Pickler
 memoization is not that hard
 
 """
-import Pickle
+##import Pickle
 
 import hashlib
 import cPickle as Pickle

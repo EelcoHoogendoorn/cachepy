@@ -148,7 +148,8 @@ class AbstractCache(object):
     def __init__(self, identifier=None, environment=None, operation=None, validate=False, timeout = 10):
         if identifier: self.identifier = identifier
         if operation: self.operation = operation
-        self.environment = environment if environment else self.environment()
+        import inspect      #make sure at least the callable itself is part of the environment key
+        self.environment = inspect.getsource(self.operation), environment if environment else self.environment()
         self.validate = validate
 
         self.filename           = os.path.join(cachepath, self.identifier)
@@ -172,54 +173,53 @@ class AbstractCache(object):
         look up a hierachical key object
         fill in the missing parts, and perform the computation at the leaf if so required
         """
-        hkey = args.append(kwargs)
+        hkey = args + (kwargs,)
         while True:
+            try:
+                #hierarchical key lookup; first key is prebound environment key
+                previouskey = Partial(self.envrowid)
+                for ikey, subkey in enumerate(hkey[:-1]):
+                    partialkey = previouskey, subkey
+                    rowid = self.shelve.getrowid(partialkey, *process_key(partialkey))  #read lock?
+                    previouskey = Partial(rowid)
+                #leaf iteration
+                ikey = len(hkey)-1
+                leafkey = previouskey, hkey[-1]
+                value = self.shelve[leafkey]                                            #read lock?
 
-                try:
-                    #hierarchical key lookup; first key is prebound environment key
-                    previouskey = Partial(self.envrowid)
-                    for ikey, subkey in enumerate(hkey[:-1]):
-                        partialkey = previouskey, subkey
-                        rowid = self.shelve.getrowid(partialkey, *process_key(partialkey))  #read lock?
-                        previouskey = Partial(rowid)
-                    #leaf iteration
-                    ikey = len(hkey)-1
-                    leafkey = previouskey, hkey[-1]
-                    value = self.shelve[leafkey]                                            #read lock?
+                if isinstance(value, Deferred):
+                    if value.expired(self.deferred_timeout):
+                        raise Exception()
+                    sleep(0.01)
+                else:
+                    if self.validate:
+                        newvalue = self.operation(*args, **kwargs)
+                        assert(Pickle.dumps(value)==Pickle.dumps(newvalue))
+                    return value
 
-                    if isinstance(value, Deferred):
-                        if value.expired(self.deferred_timeout):
-                            raise Exception()
-                        sleep(0.01)
-                    else:
-                        if self.validate:
-                            newvalue = self.operation(*args, **kwargs)
-                            assert(Pickle.dumps(value)==Pickle.dumps(newvalue))
+            except:
+                #lock for the writing branch. multiprocess does not benefit here, but so be it.
+                #worst case we make multiple insertions into db, but this should do no harm for behavior
+
+                if self.lock.locked():
+                    #if lock not available, better to go back to waiting for a deferred to appear
+                    sleep(0.01)
+                else:
+                    with self.lock:
+                        #hierarchical key insertion
+                        for subkey in hkey[ikey:-1]:
+                            partialkey = previouskey, subkey
+                            kstr, khash = process_key(partialkey)
+                            self.shelve.setitem(partialkey, None, kstr, khash)      #wite lock
+                            rowid = self.shelve.getrowid(partialkey, kstr, khash)   #read lock
+                            previouskey = Partial(rowid)
+                        #insert leaf node
+                        leafkey = previouskey, hkey[-1]
+                        kstr, khash = process_key(leafkey)
+                        self.shelve.setitem(leafkey, Deferred(), kstr, khash)       #write lock
+                        value = self.operation(*args, **kwargs)
+                        self.shelve.setitem(leafkey, value     , kstr, khash)       #write lock
                         return value
-
-                except:
-                    #lock for the writing branch. multiprocess does not benefit here, but so be it.
-                    #worst case we make multiple insertions into db, but this should do no harm for behavior
-
-                    if self.lock.locked():
-                        #if lock not available, better to go back to waiting for a deferred to appear
-                        sleep(0.01)
-                    else:
-                        with self.lock:
-                            #hierarchical key insertion
-                            for subkey in hkey[ikey:-1]:
-                                partialkey = previouskey, subkey
-                                kstr, khash = process_key(partialkey)
-                                self.shelve.setitem(partialkey, None, kstr, khash)      #wite lock
-                                rowid = self.shelve.getrowid(partialkey, kstr, khash)   #read lock
-                                previouskey = Partial(rowid)
-                            #insert leaf node
-                            leafkey = previouskey, hkey[-1]
-                            kstr, khash = process_key(leafkey)
-                            self.shelve.setitem(leafkey, Deferred(), kstr, khash)       #write lock
-                            value = self.operation(*args, **kwargs)
-                            self.shelve.setitem(leafkey, value     , kstr, khash)       #write lock
-                            return value
 
 
 
@@ -300,16 +300,20 @@ def worker(arg):
     value = cache(*arg)
     return value
 
-
 if __name__=='__main__':
 
     #test compiling the same function many times, or compilaing different functions concurrently
 
     args = [('const {dtype} = {value};', dict(dtype='int',value=3))]*10
+
+##    print cache(args[0])
+##    quit()
+
+
 ##    args = [('const {dtype} = {value};', dict(dtype='int',value=i)) for i in range(10)]
 
     #run multiple jobs concurrent as either processes or threads
-    threading=False
+    threading=True
     if threading:
         import multiprocessing.dummy as multiprocessing
     else:
