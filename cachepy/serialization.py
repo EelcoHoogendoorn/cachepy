@@ -17,8 +17,15 @@ it sounds like a lot of work to add, and not much to ask of the end user not to 
 and not to rely on the difference between reference and value equality in their keys
 
 would we like to use zlib in our encoding?
-"""
 
+note that we could subclass Pickle.Pickler, along the lines of joblib
+this means we forego cPickle performance
+but this may be an acceptable price to pay, for the ability to deal with cyclic references
+perhaps we may even want to implement our own serialization inspired by Pickler
+memoization is not that hard
+
+"""
+import Pickle
 
 import hashlib
 import cPickle as Pickle
@@ -26,7 +33,7 @@ import numpy as np
 import util
 
 import types
-#list of all types without any internal references; is this list complete?
+#list of all types without any internal references to other python objects; is this list complete?
 flat_types = types.StringTypes +(types.BooleanType, types.BufferType, types.FloatType, types.IntType,  types.LongType, types.NoneType)
 
 
@@ -56,10 +63,9 @@ class DeterministicDict(object):
     __slots__ = ['keys', 'values','type']
     def __init__(self, obj):
         keys, values = obj.keys(), obj.values()
-        keystrs   = np.array([as_deterministic(key) for key in keys])
-        valuestrs = np.array([as_deterministic(value) for value in values])
-        order = np.argsort(keystrs)
-##        self.keys   = np.array(keys)[order].tolist()
+        keystrs   = np.array([encode(as_deterministic(key))   for key in keys])
+        valuestrs = np.array([encode(as_deterministic(value)) for value in values])
+        order     = np.argsort(keystrs)
         self.keys   = keystrs  [order].tolist()     #since we dont care about unpickling our keys anyway...
         self.values = valuestrs[order].tolist()
         self.type   = type(obj)
@@ -70,10 +76,7 @@ class DeterministicSet(object):
     """
     __slots__ = ['set','type']
     def __init__(self, obj):
-        keystr = [as_deterministic(key) for key in obj]
-        self.set = sorted(keystr)
-##        order = np.argsort(keystr)
-##        self.set   = np.array(set)[order].tolist()
+        self.set = sorted(encode(as_deterministic(key)) for key in obj)
         self.type = type(obj)
 
 class UserDefinedType(object):
@@ -115,13 +118,26 @@ def as_deterministic(obj):
         return DeterministicUserDefinedType(obj)
 
 
+class DeterministicSerializer(object):
+    """
+    cut out the pickle middle man? just need our own memo implementation
+    note that this serializer does not need to be reversible; only deterministic,
+    in the sense that semantically identical objects produce identical output
+    """
+    def __init__(self, obj):
+        self.memo = {}
+        import StringIO
+        self.buffer = StringIO.StringIO()
+
 
 if __name__=='__main__':
     class Dummy(object):
         a=3
         def __init__(self):
             self.b=4
-    key = (Dummy(), {3:4, 5:6})     #take a rather complex key
+    k1, k2 = {1: 0, 9: 0}, {9: 0, 1: 0}
+
+    key = (Dummy(), k1)     #take a rather complex key
     q = as_deterministic(key)
     print encode(q)
 

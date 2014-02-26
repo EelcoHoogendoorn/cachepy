@@ -52,7 +52,27 @@ note on the determinism of serialization:
     im not sure how robust this is; review here would be greatly appreciated
     not that in its present form, cyclic references and reference equality are not respected
 
+
+joblib integration:
+    quite some overlap. steal its deterministic pickling code?
+joblib missing features:
+    exact key storage
+    locking mechanism
+    deferred mechanism
+    environment mechanism
+
+
+ideally, create a variety of disk based key-value stores.
+different scenarios will call for different shelve designs:
+    read/write
+    exact/inexact keys
+    different locking strategies
+    local/server based
+
 """
+
+##import joblib
+##joblib.hash
 
 
 
@@ -84,7 +104,7 @@ except:
     pass
 
 import datetime
-datetime.datetime
+
 
 class Deferred(object):
     """
@@ -133,7 +153,7 @@ class AbstractCache(object):
 
         self.filename           = os.path.join(cachepath, self.identifier)
         self.lock = threading.Lock()
-##        self.lock_file = lockfile.MkdirLockFile(self.filename, timeout = timeout)
+        self.lock_file = lockfile.MkdirLockFile(self.filename, timeout = timeout)
 
         self.shelve             = Shelve(self.filename, autocommit = True)
         self.shelve.clear()   #for debugging
@@ -147,12 +167,12 @@ class AbstractCache(object):
 
 
 
-
-    def __call__(self, *hkey):
+    def __call__(self, *args, **kwargs):
         """
         look up a hierachical key object
         fill in the missing parts, and perform the computation at the leaf if so required
         """
+        hkey = args.append(kwargs)
         while True:
 
                 try:
@@ -173,7 +193,7 @@ class AbstractCache(object):
                         sleep(0.01)
                     else:
                         if self.validate:
-                            newvalue = self.operation(*hkey)
+                            newvalue = self.operation(*args, **kwargs)
                             assert(Pickle.dumps(value)==Pickle.dumps(newvalue))
                         return value
 
@@ -197,7 +217,7 @@ class AbstractCache(object):
                             leafkey = previouskey, hkey[-1]
                             kstr, khash = process_key(leafkey)
                             self.shelve.setitem(leafkey, Deferred(), kstr, khash)       #write lock
-                            value = self.operation(*hkey)
+                            value = self.operation(*args, **kwargs)
                             self.shelve.setitem(leafkey, value     , kstr, khash)       #write lock
                             return value
 

@@ -16,7 +16,7 @@ intended to be managed from within a Cache object, which defines its interaction
 import cPickle as Pickle
 import numpy as np
 import hashlib
-import serialization
+from serialization import as_deterministic
 import gzip     #global zip of our cache may be worthwhile
 import util
 
@@ -24,7 +24,7 @@ import util
 def pickling(obj):
     return Pickle.dumps(obj, protocol=util.pickle_protocol)
 def hashing(obj):
-    return hashlib.sha256(pickling(serialization.as_deterministic(obj))).digest()
+    return hashlib.sha256(pickling(as_deterministic(obj))).digest()
 
 class ReadOnlyShelve(object):
     def __init__(self, filename):
@@ -53,8 +53,9 @@ class ReadOnlyShelve(object):
 
 if __name__=='__main__':
     #create some random junk data, including a nontrivial key
+    k1, k2 = {1: 0, 9: 0}, {9: 0, 1: 0}
     items = [('a', 4), ('b', 30), ('eelco',3)]
-    items.append((dict(a=3,b=4), 'value'))
+    items.append((k1, 'value'))
 
     import tempfile
     filename = tempfile.mktemp()
@@ -63,8 +64,8 @@ if __name__=='__main__':
 
     #lets see if this works:
     print rs['a']
-    d = dict(a=3,b=4)
-    print rs[d]
-    d = {'b':4,'a':3}
-    print rs[d]
+    k1, k2 = {1: 0, 9: 0}, {9: 0, 1: 0}
+
+    print rs[k1]
+    print rs[k2]
 
