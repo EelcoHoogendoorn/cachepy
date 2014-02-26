@@ -27,6 +27,12 @@ def hashing(obj):
     return hashlib.sha256(pickling(as_deterministic(obj))).digest()
 
 class ReadOnlyShelve(object):
+    """
+    read only shelve object
+    note that this isnt a lazy store; a dict is saved and loaded as one piece
+    this is appropriate if a large fraction of the information is expected to be used at each run
+
+    """
     def __init__(self, filename):
         self.filename = filename
 
@@ -47,7 +53,10 @@ class ReadOnlyShelve(object):
         values = np.array( [pickling(value) for value in values])
         assert np.unique(hashes).size == hashes.size, \
             'Holy shit, 256 bit hash collision! Make some superficial changes to your code to make this go away!'
-        Pickle.dump(dict(zip(hashes, values)), gzip.open(filename, 'wb'), protocol=util.pickle_protocol)
+        Pickle.dump(
+            dict(zip(hashes, values)),
+            gzip.open(filename, 'wb'),
+            protocol=util.pickle_protocol)
 
 
 

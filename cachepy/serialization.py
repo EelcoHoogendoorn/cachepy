@@ -1,143 +1,197 @@
 
 """
-serialization module
+deterministic pickling of python objects
+code adapted from joblib, as indicated below
+"""
 
-includes all requisite machinery to serialize key objects in a determinstic manner
-note that for the purposes of caching we do not care about getting the key information back intact;
-'destructively' mapping to a characteristic string is fine as far as keys are concerned,
-as long as the process is unique and repeatable
-
-specifically, this module aims to serialize dicts and sets in a deterministic manner
-also, there is a default deterministic serializer for user defined types
-im not sure how robust it is. review needed, plz
-
-note that this code does not handle cyclic references, or reference equality
-im not sure its worthwhile to add support for this
-it sounds like a lot of work to add, and not much to ask of the end user not to use cyclic references
-and not to rely on the difference between reference and value equality in their keys
-
-would we like to use zlib in our encoding?
-
-note that we could subclass Pickle.Pickler, along the lines of joblib
-this means we forego cPickle performance
-but this may be an acceptable price to pay, for the ability to deal with cyclic references
-perhaps we may even want to implement our own serialization inspired by Pickler
-memoization is not that hard
 
 """
-##import Pickle
+Fast cryptographic hash of Python objects, with a special case for fast
+hashing of numpy arrays.
+"""
 
+# Author: Gael Varoquaux <gael dot varoquaux at normalesup dot org>
+# Copyright (c) 2009 Gael Varoquaux
+# License: BSD Style, 3 clauses.
+
+import warnings
+import pickle
 import hashlib
-import cPickle as Pickle
-import numpy as np
-import util
-
+import sys
 import types
-#list of all types without any internal references to other python objects; is this list complete?
-flat_types = types.StringTypes +(types.BooleanType, types.BufferType, types.FloatType, types.IntType,  types.LongType, types.NoneType)
+import struct
+
+import io
+
+if sys.version_info[0] < 3:
+    Pickler = pickle.Pickler
+else:
+    Pickler = pickle._Pickler
 
 
-def encode(obj):
-    return Pickle.dumps(obj, protocol=util.pickle_protocol)    #protocol 2 is the highest protocol which is python2/3 cross compatible. but do we care?
-
-##def decode(obj):
-##    return Pickle.loads(str(obj))
-##
-##def hashing(strobj):
-##    return hashlib.sha256(strobj).digest()
-##
-##def hash_str_to_u64(strobj):
-##    """note; we could simply use text hash field rather than int?"""
-##    return reduce(np.bitwise_xor, np.frombuffer(hashing(strobj), dtype=np.uint64)) + 1
-##
-##def process_key(key):
-##    keystr = encode(key)
-##    keyhash = hash_str_to_u64(keystr)
-##    return keystr, keyhash
-
-
-class DeterministicDict(object):
+class _ConsistentSet(object):
+    """ Class used to ensure the hash of Sets is preserved
+        whatever the order of its items.
     """
-    wrapper class around dict to ensure it serializes in a determinstic manner
-    """
-    __slots__ = ['keys', 'values','type']
-    def __init__(self, obj):
-        keys, values = obj.keys(), obj.values()
-        keystrs   = np.array([encode(as_deterministic(key))   for key in keys])
-        valuestrs = np.array([encode(as_deterministic(value)) for value in values])
-        order     = np.argsort(keystrs)
-        self.keys   = keystrs  [order].tolist()     #since we dont care about unpickling our keys anyway...
-        self.values = valuestrs[order].tolist()
-        self.type   = type(obj)
+    def __init__(self, set_sequence):
+        self._sequence = sorted(set_sequence)
 
-class DeterministicSet(object):
-    """
-    deterministic set object
-    """
-    __slots__ = ['set','type']
-    def __init__(self, obj):
-        self.set = sorted(encode(as_deterministic(key)) for key in obj)
-        self.type = type(obj)
 
-class UserDefinedType(object):
-    """dummy type to obtain a list of all members not associated with relevant state"""
-import inspect
-standard_members = [k for k,v in inspect.getmembers(UserDefinedType())]
+class _MyHash(object):
+    """ Class used to hash objects that won't normally pickle """
 
-class DeterministicUserDefinedType(object):
-    """
-    a default serializer for user defined types
-    almost seems too easy... are there gotchas im missing?
-    a key-value mapping and an associated type are basically all python objects are, no?
-    """
-    __slots__ = ['dict', 'type']
-    def __init__(self, obj):
-        self.dict = DeterministicDict({k:v for k,v in inspect.getmembers(obj) if not k in standard_members})
-        self.type = type(obj)
+    def __init__(self, *args):
+        self.args = args
 
+
+class DeterministicPickler(Pickler):
+    """ A subclass of pickler, to produce a deterministic result
+    """
+
+    def __init__(self, hash_name='md5'):
+        self.stream = io.BytesIO()
+        Pickler.__init__(self, self.stream, protocol=2)
+
+    def dumps(self, obj):
+        try:
+            self.dump(obj)
+        except pickle.PicklingError as e:
+            warnings.warn('PicklingError while hashing %r: %r' % (obj, e))
+        return str(self.stream.getvalue())
+
+    def save(self, obj):
+        if isinstance(obj, (types.MethodType, type({}.pop))):
+            # the Pickler cannot pickle instance methods; here we decompose
+            # them into components that make them uniquely identifiable
+            if hasattr(obj, '__func__'):
+                func_name = obj.__func__.__name__
+            else:
+                func_name = obj.__name__
+            inst = obj.__self__
+            if type(inst) == type(pickle):
+                obj = _MyHash(func_name, inst.__name__)
+            elif inst is None:
+                # type(None) or type(module) do not pickle
+                obj = _MyHash(func_name, inst)
+            else:
+                cls = obj.__self__.__class__
+                obj = _MyHash(func_name, inst, cls)
+        Pickler.save(self, obj)
+
+    # The dispatch table of the pickler is not accessible in Python
+    # 3, as these lines are only bugware for IPython, we skip them.
+    def save_global(self, obj, name=None, pack=struct.pack):
+        # We have to override this method in order to deal with objects
+        # defined interactively in IPython that are not injected in
+        # __main__
+        kwargs = dict(name=name, pack=pack)
+        if sys.version_info >= (3, 4):
+            del kwargs['pack']
+        try:
+            Pickler.save_global(self, obj, **kwargs)
+        except pickle.PicklingError:
+            Pickler.save_global(self, obj, **kwargs)
+            module = getattr(obj, "__module__", None)
+            if module == '__main__':
+                my_name = name
+                if my_name is None:
+                    my_name = obj.__name__
+                mod = sys.modules[module]
+                if not hasattr(mod, my_name):
+                    # IPython doesn't inject the variables define
+                    # interactively in __main__
+                    setattr(mod, my_name, obj)
+
+    dispatch = Pickler.dispatch.copy()
+    # builtin
+    dispatch[type(len)] = save_global
+    # type
+    dispatch[type(object)] = save_global
+    # classobj
+    dispatch[type(Pickler)] = save_global
+    # function
+    dispatch[type(pickle.dump)] = save_global
+
+    def _batch_setitems(self, items):
+        # forces order of keys in dict to ensure consistent hash
+        Pickler._batch_setitems(self, iter(sorted(items)))
+
+    def save_set(self, set_items):
+        # forces order of items in Set to ensure consistent hash
+        Pickler.save(self, _ConsistentSet(set_items))
+
+    dispatch[type(set())] = save_set
+
+
+#note; fold in smart numpy serialization as well
+class NumpyHasher(DeterministicPickler):
+    """ Special case the hasher for when numpy is loaded.
+    """
+
+    def __init__(self, hash_name='md5', coerce_mmap=False):
+        """
+            Parameters
+            ----------
+            hash_name: string
+                The hash algorithm to be used
+            coerce_mmap: boolean
+                Make no difference between np.memmap and np.ndarray
+                objects.
+        """
+        self.coerce_mmap = coerce_mmap
+        Hasher.__init__(self, hash_name=hash_name)
+        # delayed import of numpy, to avoid tight coupling
+        import numpy as np
+        self.np = np
+        if hasattr(np, 'getbuffer'):
+            self._getbuffer = np.getbuffer
+        else:
+            self._getbuffer = memoryview
+
+    def save(self, obj):
+        """ Subclass the save method, to hash ndarray subclass, rather
+            than pickling them. Off course, this is a total abuse of
+            the Pickler class.
+        """
+        if isinstance(obj, self.np.ndarray) and not obj.dtype.hasobject:
+            # Compute a hash of the object:
+            try:
+                self._hash.update(self._getbuffer(obj))
+            except (TypeError, BufferError, ValueError):
+                # Cater for non-single-segment arrays: this creates a
+                # copy, and thus aleviates this issue.
+                # XXX: There might be a more efficient way of doing this
+                # Python 3.2's memoryview raise a ValueError instead of a
+                # TypeError or a BufferError
+                self._hash.update(self._getbuffer(obj.flatten()))
+
+            # We store the class, to be able to distinguish between
+            # Objects with the same binary content, but different
+            # classes.
+            if self.coerce_mmap and isinstance(obj, self.np.memmap):
+                # We don't make the difference between memmap and
+                # normal ndarrays, to be able to reload previously
+                # computed results with memmap.
+                klass = self.np.ndarray
+            else:
+                klass = obj.__class__
+            # We also return the dtype and the shape, to distinguish
+            # different views on the same data with different dtypes.
+
+            # The object will be pickled by the pickler hashed at the end.
+            obj = (klass, ('HASHED', obj.dtype, obj.shape, obj.strides))
+        Hasher.save(self, obj)
 
 def as_deterministic(obj):
-    """
-    recusive mapping of object hierarchies to deterministic equivalents
-    note; this is not safe against cyclic dependencies
-
-    inspired by:
-    http://stackoverflow.com/questions/985294/is-the-pickling-process-deterministic
-    """
-    if isinstance(obj, flat_types):     #if the object does not contain internal references, we are happy as-is
-        return obj
-    if isinstance(obj, types.DictionaryType):
-        return DeterministicDict(obj)
-    if isinstance(obj, (set, frozenset)):
-        return DeterministicSet(obj)
-    if isinstance(obj, types.TupleType):
-        return tuple(as_deterministic(o) for o in obj)
-    elif isinstance(obj, types.ListType):
-        return [as_deterministic(o) for o in obj]
-    else:
-        return DeterministicUserDefinedType(obj)
+##    return pickle.dumps(obj)
+    return DeterministicPickler().dumps(obj)
 
 
-class DeterministicSerializer(object):
-    """
-    cut out the pickle middle man? just need our own memo implementation
-    note that this serializer does not need to be reversible; only deterministic,
-    in the sense that semantically identical objects produce identical output
-    """
-    def __init__(self, obj):
-        self.memo = {}
-        import StringIO
-        self.buffer = StringIO.StringIO()
 
 
 if __name__=='__main__':
-    class Dummy(object):
-        a=3
-        def __init__(self):
-            self.b=4
+
     k1, k2 = {1: 0, 9: 0}, {9: 0, 1: 0}
 
-    key = (Dummy(), k1)     #take a rather complex key
-    q = as_deterministic(key)
-    print encode(q)
-
+    print len(as_deterministic(k1))
+    print pickle.loads(as_deterministic(k2))

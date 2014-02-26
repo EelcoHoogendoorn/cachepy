@@ -91,6 +91,7 @@ def process_key(key):
     return keystr, keyhash
 
 class Key(object):
+    """use this upcasting mechanism thoughout the code; much cleaner"""
     def __init__(self, key):
         if isinstance(key, Key):
             self.keystr, self.keyhash = key.keystr, key.keyhash

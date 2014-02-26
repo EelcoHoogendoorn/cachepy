@@ -51,6 +51,7 @@ note on the determinism of serialization:
     all container types are recursively treated, including the attrs of user defined types
     im not sure how robust this is; review here would be greatly appreciated
     not that in its present form, cyclic references and reference equality are not respected
+    i am now using the joblib solution. this looks good
 
 
 joblib integration:
@@ -69,10 +70,12 @@ different scenarios will call for different shelve designs:
     different locking strategies
     local/server based
 
-"""
 
-##import joblib
-##joblib.hash
+locking:
+    havnt quite figured it out yet, but almost there
+    lockfile based locking makes for a good default;
+    but it would be nice to be able to disable when NFS compatibility is not needed
+"""
 
 
 
@@ -83,11 +86,11 @@ from shelve2 import Shelve, process_key, encode
 from time import clock, sleep, time
 
 import threading
-import collections
 
 
 import numpy as np
-
+import inspect
+from serialization import as_deterministic
 
 
 import lockfile.mkdirlockfile as lockfile
@@ -104,6 +107,7 @@ except:
     pass
 
 import datetime
+
 
 
 class Deferred(object):
@@ -137,33 +141,58 @@ class Partial(object):
 
 
 
-
-
 class AbstractCache(object):
     """
-    cache object which gracefully handles large arbitrary key objects
+    abstract base class of a cache object which gracefully handles large arbitrary key objects
 
     operation and environment methods must be overloaded
     """
-    def __init__(self, identifier=None, environment=None, operation=None, validate=False, timeout = 10):
+    def __init__(
+            self,
+            identifier          = None,     #name under which the cache file is stored. defaults to modulename.classname
+            environment         = None,     #object containing information regarding the dependencies of the cached operation
+            operation           = None,     #function to be cached. note that the order of arguments is significant for key reuse
+            validate            = False,    #validation mode. if enabled, all cache retrievals are checked against a recomputed function call.
+            deferred_timeout    = 30,       #time to wait before a deferred object is considered obsolete. compilation may take a long time; that said, it may also crash your process...
+            lock_timeout        = 1,        #time to wait before a lock is considered obsolete. the lock is needed for pure db transactions only; this makes once second a long time
+            environment_clear   = True,     #clear the cache upon connection with a novel environment key
+            connect_clear       = False     #clear the cache upon every connection
+            ):
+        """
+        if environment_clear is set to true, the cache is cleared
+        """
         if identifier: self.identifier = identifier
         if operation: self.operation = operation
-        import inspect      #make sure at least the callable itself is part of the environment key
-        self.environment = inspect.getsource(self.operation), environment if environment else self.environment()
-        self.validate = validate
+        #add some essentials to the environment
+        import platform
+        globalenv               = platform.architecture(), platform.python_version()
+        funcenv                 = inspect.getargspec(self.operation), inspect.getsource(self.operation)
+        self.environment        = globalenv, funcenv, (environment if environment else self.environment())
+        estr, ehash             = process_key(self.environment)
+
+        self.validate           = validate
+        self.lock_timeout       = lock_timeout
+        self.deferred_timeout   = deferred_timeout
 
         self.filename           = os.path.join(cachepath, self.identifier)
-        self.lock = threading.Lock()
-        self.lock_file = lockfile.MkdirLockFile(self.filename, timeout = timeout)
-
         self.shelve             = Shelve(self.filename, autocommit = True)
-        self.shelve.clear()   #for debugging
+        self.lock               = threading.Lock()
+        self.lock_file          = lockfile.MkdirLockFile(self.filename, timeout = lock_timeout)
 
+        with self.lock_file:
+            if connect_clear:
+                #this isnt right; we are now invalidating the precomputed envrowid of other processes...
+                self.shelve.clear()           #write lock
 
-        #write environment key to database and obtain its unique rowid
-        estr, ehash = process_key(self.environment)
-        self.shelve.setitem(self.environment, None, estr, ehash)
-        self.envrowid = self.shelve.getrowid(self.environment, estr, ehash)
+            #write environment key to database and obtain its unique rowid
+            try:
+                self.envrowid = self.shelve.getrowid(self.environment, estr, ehash)
+            except:
+                #connect to the db with a novel environment; probably wont change back again
+                if environment_clear:
+                    self.shelve.clear()         #write lock
+                self.shelve.setitem(self.environment, None, estr, ehash)
+                self.envrowid = self.shelve.getrowid(self.environment, estr, ehash)
 
 
 
@@ -173,19 +202,24 @@ class AbstractCache(object):
         look up a hierachical key object
         fill in the missing parts, and perform the computation at the leaf if so required
         """
-        hkey = args + (kwargs,)
+        #kwargs are last subkey?
+        hkey = args + ((kwargs,) if kwargs else ())
+        #preprocess subkeys. this minimizes time spent in locked state
+        hkey = map(as_deterministic, hkey)
+
         while True:
             try:
-                #hierarchical key lookup; first key is prebound environment key
-                previouskey = Partial(self.envrowid)
-                for ikey, subkey in enumerate(hkey[:-1]):
-                    partialkey = previouskey, subkey
-                    rowid = self.shelve.getrowid(partialkey, *process_key(partialkey))  #read lock?
-                    previouskey = Partial(rowid)
-                #leaf iteration
-                ikey = len(hkey)-1
-                leafkey = previouskey, hkey[-1]
-                value = self.shelve[leafkey]                                            #read lock?
+                with self.lock, self.lock_file:
+                    #hierarchical key lookup; first key is prebound environment key
+                    previouskey = Partial(self.envrowid)
+                    for ikey, subkey in enumerate(hkey[:-1]):
+                        partialkey = previouskey, subkey
+                        rowid = self.shelve.getrowid(partialkey, *process_key(partialkey))  #read lock?
+                        previouskey = Partial(rowid)
+                    #leaf iteration
+                    ikey = len(hkey)-1
+                    leafkey = previouskey, hkey[-1]
+                    value = self.shelve[leafkey]                                            #read lock?
 
                 if isinstance(value, Deferred):
                     if value.expired(self.deferred_timeout):
@@ -193,19 +227,22 @@ class AbstractCache(object):
                     sleep(0.01)
                 else:
                     if self.validate:
+                        #check if recomputed value is identical under deterministic serialization
                         newvalue = self.operation(*args, **kwargs)
-                        assert(Pickle.dumps(value)==Pickle.dumps(newvalue))
+                        assert(as_deterministic(value)==as_deterministic(newvalue))
+
+                    #yes! hitting this return is what we are doing this all for!
                     return value
 
             except:
                 #lock for the writing branch. multiprocess does not benefit here, but so be it.
                 #worst case we make multiple insertions into db, but this should do no harm for behavior
 
-                if self.lock.locked():
+                if self.lock.locked() or self.lock_file.is_locked():
                     #if lock not available, better to go back to waiting for a deferred to appear
-                    sleep(0.01)
+                    sleep(0.001)
                 else:
-                    with self.lock:
+                    with self.lock_file:
                         #hierarchical key insertion
                         for subkey in hkey[ikey:-1]:
                             partialkey = previouskey, subkey
@@ -217,7 +254,11 @@ class AbstractCache(object):
                         leafkey = previouskey, hkey[-1]
                         kstr, khash = process_key(leafkey)
                         self.shelve.setitem(leafkey, Deferred(), kstr, khash)       #write lock
-                        value = self.operation(*args, **kwargs)
+
+                    #dont need lock while doing expensive things
+                    value = self.operation(*args, **kwargs)
+
+                    with self.lock_file:
                         self.shelve.setitem(leafkey, value     , kstr, khash)       #write lock
                         return value
 
@@ -240,14 +281,72 @@ class AbstractCache(object):
         raise NotImplementedError()
 
 
+
+
+##class CacheDecorator(object):
+##    def __init__(
+##            self,
+##            operation,              #function to be cached
+##            identifier  = None,     #if none, the module and function name of operation are used to generate a representative identifier
+##            environment = None,     #to specify source dependencies of the cached operation
+##            **kwargs                #additional kwargs will be passed to the cache object
+##            ):
+##        """
+##        provide a function with caching behavior in a minimally intrusive manner
+##        """
+##        identifier  = identifier  if identifier  else inspect.getmodule(operation).__name__ + '_' + operation.__name__
+##        environment = environment if environment else True
+##        self.cache = AbstractCache(identifier, environment, operation, **kwargs)
+##
+##    def __call__(self, *args, **kwargs):
+##        return self.cache(*args, **kwargs)
+
+def CacheDecorator(
+        identifier  = None,     #if none, the module and function name of operation are used to generate a representative identifier
+        environment = None,     #to specify source dependencies of the cached operation
+        **kwargs                #additional kwargs will be passed to the cache object
+        ):
+    """
+    wrap a function with caching behavior
+    """
+    def wrap(operation):
+        cache = AbstractCache(
+            identifier  = identifier  if identifier  else inspect.getmodule(operation).__name__ + '_' + operation.__name__,
+            environment = environment if environment else True,
+            operation   = operation,
+            **kwargs)
+        def inner(*args, **kwargs):
+            return cache(*args, **kwargs)
+        return inner
+    return wrap
+cached = CacheDecorator     #an alias
+memoize = CacheDecorator    #prebind some arguments relating to in-memory storage?
+
+
+
 """
 client code starts here;
-from pycache import Cache
+from pycache import cached
 """
 
-
-
 import numpy as np
+
+
+
+if False:
+    @cached(connect_clear=True)
+    def compile(source, templates):
+        print 'compiling'
+        sleep(1)
+        return source.format(**templates)
+
+    print compile('const {dtype} = {value};', dict(dtype='int',value=3))
+    print compile('const {dtype} = {value};', dict(dtype='int',value=3))
+    quit()
+
+
+
+
 
 class CompilationCache(AbstractCache):
     """
@@ -261,14 +360,13 @@ class CompilationCache(AbstractCache):
         sleep(1)
         return source.format(**templates)
 
-
     def environment(self):
         version='3.4'
         compiler='llvm'
         return version, compiler
 
 
-cache = CompilationCache()
+cache = CompilationCache(connect_clear=True)
 
 
 
@@ -305,15 +403,10 @@ if __name__=='__main__':
     #test compiling the same function many times, or compilaing different functions concurrently
 
     args = [('const {dtype} = {value};', dict(dtype='int',value=3))]*10
-
-##    print cache(args[0])
-##    quit()
-
-
 ##    args = [('const {dtype} = {value};', dict(dtype='int',value=i)) for i in range(10)]
 
     #run multiple jobs concurrent as either processes or threads
-    threading=True
+    threading=False
     if threading:
         import multiprocessing.dummy as multiprocessing
     else:
