@@ -90,6 +90,13 @@ def process_key(key):
     keyhash = hash_str_to_u64(keystr)
     return keystr, keyhash
 
+class Key(object):
+    def __init__(self, key):
+        if isinstance(key, Key):
+            self.keystr, self.keyhash = key.keystr, key.keyhash
+        else:
+            self.keystr, self.keyhash = process_key(key)
+
 
 class Shelve(object, DictMixin):
     def __init__(self, filename=None, flag='c',
