@@ -66,15 +66,22 @@ joblib missing features:
 ideally, create a variety of disk based key-value stores.
 different scenarios will call for different shelve designs:
     read/write
-    exact/inexact keys
+    hashed/full keys
+    deterministic/nondeterminstic serialization of keys
     different locking strategies
     local/server based
+    on disk / in memory
 
 
 locking:
     havnt quite figured it out yet, but almost there
     lockfile based locking makes for a good default;
     but it would be nice to be able to disable when NFS compatibility is not needed
+
+why this is still primarily a compilation caching project, rather than a general caching project:
+    correctness is emphasized over performance, that is,
+    it is assumed that the stored data has a high compute intensity
+
 """
 
 
@@ -202,65 +209,66 @@ class AbstractCache(object):
         look up a hierachical key object
         fill in the missing parts, and perform the computation at the leaf if so required
         """
-        #kwargs are last subkey?
+        #kwargs are last subkey. is this optimal?
         hkey = args + ((kwargs,) if kwargs else ())
         #preprocess subkeys. this minimizes time spent in locked state
         hkey = map(as_deterministic, hkey)
 
-        while True:
-            try:
-                with self.lock, self.lock_file:
-                    #hierarchical key lookup; first key is prebound environment key
-                    previouskey = Partial(self.envrowid)
-                    for ikey, subkey in enumerate(hkey[:-1]):
-                        partialkey = previouskey, subkey
-                        rowid = self.shelve.getrowid(partialkey, *process_key(partialkey))  #read lock?
-                        previouskey = Partial(rowid)
-                    #leaf iteration
-                    ikey = len(hkey)-1
-                    leafkey = previouskey, hkey[-1]
-                    value = self.shelve[leafkey]                                            #read lock?
-
-                if isinstance(value, Deferred):
-                    if value.expired(self.deferred_timeout):
-                        raise Exception()
-                    sleep(0.01)
-                else:
-                    if self.validate:
-                        #check if recomputed value is identical under deterministic serialization
-                        newvalue = self.operation(*args, **kwargs)
-                        assert(as_deterministic(value)==as_deterministic(newvalue))
-
-                    #yes! hitting this return is what we are doing this all for!
-                    return value
-
-            except:
-                #lock for the writing branch. multiprocess does not benefit here, but so be it.
-                #worst case we make multiple insertions into db, but this should do no harm for behavior
-
-                if self.lock.locked() or self.lock_file.is_locked():
-                    #if lock not available, better to go back to waiting for a deferred to appear
-                    sleep(0.001)
-                else:
+        with self.lock:     #fairly stupid thread locking. dont use threads; how about that?
+            while True:
+                try:
                     with self.lock_file:
-                        #hierarchical key insertion
-                        for subkey in hkey[ikey:-1]:
+                        #hierarchical key lookup; first key is prebound environment key
+                        previouskey = Partial(self.envrowid)
+                        for ikey, subkey in enumerate(hkey[:-1]):
                             partialkey = previouskey, subkey
-                            kstr, khash = process_key(partialkey)
-                            self.shelve.setitem(partialkey, None, kstr, khash)      #wite lock
-                            rowid = self.shelve.getrowid(partialkey, kstr, khash)   #read lock
+                            rowid = self.shelve.getrowid(partialkey, *process_key(partialkey))  #read lock?
                             previouskey = Partial(rowid)
-                        #insert leaf node
+                        #leaf iteration
+                        ikey = len(hkey)-1
                         leafkey = previouskey, hkey[-1]
-                        kstr, khash = process_key(leafkey)
-                        self.shelve.setitem(leafkey, Deferred(), kstr, khash)       #write lock
+                        value = self.shelve[leafkey]                                            #read lock?
 
-                    #dont need lock while doing expensive things
-                    value = self.operation(*args, **kwargs)
+                    if isinstance(value, Deferred):
+                        if value.expired(self.deferred_timeout):
+                            raise Exception()
+                        sleep(0.01)
+                    else:
+                        if self.validate:
+                            #check if recomputed value is identical under deterministic serialization
+                            newvalue = self.operation(*args, **kwargs)
+                            assert(as_deterministic(value)==as_deterministic(newvalue))
 
-                    with self.lock_file:
-                        self.shelve.setitem(leafkey, value     , kstr, khash)       #write lock
+                        #yes! hitting this return is what we are doing this all for!
                         return value
+
+                except:
+                    #lock for the writing branch. multiprocess does not benefit here, but so be it.
+                    #worst case we make multiple insertions into db, but this should do no harm for behavior
+
+                    if self.lock_file.is_locked():
+                        #if lock not available, better to go back to waiting for a deferred to appear
+                        sleep(0.001)
+                    else:
+                        with self.lock_file:
+                            #hierarchical key insertion
+                            for subkey in hkey[ikey:-1]:
+                                partialkey = previouskey, subkey
+                                kstr, khash = process_key(partialkey)
+                                self.shelve.setitem(partialkey, None, kstr, khash)      #wite lock
+                                rowid = self.shelve.getrowid(partialkey, kstr, khash)   #read lock
+                                previouskey = Partial(rowid)
+                            #insert leaf node
+                            leafkey = previouskey, hkey[-1]
+                            kstr, khash = process_key(leafkey)
+                            self.shelve.setitem(leafkey, Deferred(), kstr, khash)       #write lock
+
+                        #dont need lock while doing expensive things
+                        value = self.operation(*args, **kwargs)
+
+                        with self.lock_file:
+                            self.shelve.setitem(leafkey, value     , kstr, khash)       #write lock
+                            return value
 
 
 
@@ -319,8 +327,11 @@ def CacheDecorator(
             return cache(*args, **kwargs)
         return inner
     return wrap
-cached = CacheDecorator     #an alias
-memoize = CacheDecorator    #prebind some arguments relating to in-memory storage?
+#a simple alias
+cached = CacheDecorator
+#prebind some arguments relating to in-memory storage?
+#with in memory dict and non-deterministic cPickle serializer makes a good memoize
+memoize = CacheDecorator
 
 
 
@@ -403,7 +414,7 @@ if __name__=='__main__':
     #test compiling the same function many times, or compilaing different functions concurrently
 
     args = [('const {dtype} = {value};', dict(dtype='int',value=3))]*10
-##    args = [('const {dtype} = {value};', dict(dtype='int',value=i)) for i in range(10)]
+    args = [('const {dtype} = {value};', dict(dtype='int',value=i)) for i in range(10)]
 
     #run multiple jobs concurrent as either processes or threads
     threading=False
