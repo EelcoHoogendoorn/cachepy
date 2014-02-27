@@ -81,6 +81,8 @@ locking:
 why this is still primarily a compilation caching project, rather than a general caching project:
     correctness is emphasized over performance, that is,
     it is assumed that the stored data has a high compute intensity
+    that said, once the code is generalized enough, we may just as well select
+    a nondeterministic serialization and an in-memory store to get an efficient memoize function
 
 """
 
