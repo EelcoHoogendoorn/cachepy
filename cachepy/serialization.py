@@ -1,14 +1,19 @@
 
 """
 deterministic pickling of python objects
+the problem which this module solves is that
+dumps({1: 0, 9: 0}) != dumps({9: 0, 1: 0})
+using as_deterministic instead of dumps, we are good
+
 code adapted from joblib, as indicated below
-"""
+
+one weakness i have found so far is that numpy array view relationships are flattend
+in the pickling process. not likely to be an immediate issue, but good to be aware of
+i couldnt guarantee that there arnt any other gotchas like that
 
 
 """
-Fast cryptographic hash of Python objects, with a special case for fast
-hashing of numpy arrays.
-"""
+
 
 # Author: Gael Varoquaux <gael dot varoquaux at normalesup dot org>
 # Copyright (c) 2009 Gael Varoquaux
@@ -20,6 +25,7 @@ import hashlib
 import sys
 import types
 import struct
+import util
 
 import io
 
@@ -45,18 +51,20 @@ class _MyHash(object):
 
 
 class DeterministicPickler(Pickler):
-    """ A subclass of pickler, to produce a deterministic result
+    """
+    A subclass of pickler, to produce a deterministic result
+    unpickable things like functions are irreversably serialized
     """
 
-    def __init__(self, hash_name='md5'):
+    def __init__(self):
         self.stream = io.BytesIO()
-        Pickler.__init__(self, self.stream, protocol=2)
+        Pickler.__init__(self, self.stream, protocol=util.pickle_protocol)
 
     def dumps(self, obj):
         try:
             self.dump(obj)
         except pickle.PicklingError as e:
-            warnings.warn('PicklingError while hashing %r: %r' % (obj, e))
+            warnings.warn('PicklingError while pickling %r: %r' % (obj, e))
         return str(self.stream.getvalue())
 
     def save(self, obj):
@@ -123,12 +131,32 @@ class DeterministicPickler(Pickler):
     dispatch[type(set())] = save_set
 
 
-#note; fold in smart numpy serialization as well
-class NumpyHasher(DeterministicPickler):
-    """ Special case the hasher for when numpy is loaded.
+
+import numpy as np
+class ndarray_own(object):
+    def __init__(self, arr):
+        self.buffer     = np.getbuffer(arr)
+        self.dtype      = arr.dtype
+        self.shape      = arr.shape
+        self.strides    = arr.strides
+
+class ndarray_view(object):
+    def __init__(self, arr):
+        self.base       = arr.base
+        self.offset     = self.base.ctypes.data - arr.ctypes.data   #so we have a view; but where is it?
+        self.dtype      = arr.dtype
+        self.shape      = arr.shape
+        self.strides    = arr.strides
+
+
+class NumpyDeterministicPickler(DeterministicPickler):
+    """
+    Special case for numpy.
+    in general, external C objects may include internal state which does not serialize in a way we want it to
+    ndarray memory aliasing is one of those things
     """
 
-    def __init__(self, hash_name='md5', coerce_mmap=False):
+    def __init__(self, coerce_mmap=False):
         """
             Parameters
             ----------
@@ -139,7 +167,7 @@ class NumpyHasher(DeterministicPickler):
                 objects.
         """
         self.coerce_mmap = coerce_mmap
-        Hasher.__init__(self, hash_name=hash_name)
+        DeterministicPickler.__init__(self)
         # delayed import of numpy, to avoid tight coupling
         import numpy as np
         self.np = np
@@ -149,42 +177,55 @@ class NumpyHasher(DeterministicPickler):
             self._getbuffer = memoryview
 
     def save(self, obj):
-        """ Subclass the save method, to hash ndarray subclass, rather
-            than pickling them. Off course, this is a total abuse of
-            the Pickler class.
         """
-        if isinstance(obj, self.np.ndarray) and not obj.dtype.hasobject:
-            # Compute a hash of the object:
-            try:
-                self._hash.update(self._getbuffer(obj))
-            except (TypeError, BufferError, ValueError):
-                # Cater for non-single-segment arrays: this creates a
-                # copy, and thus aleviates this issue.
-                # XXX: There might be a more efficient way of doing this
-                # Python 3.2's memoryview raise a ValueError instead of a
-                # TypeError or a BufferError
-                self._hash.update(self._getbuffer(obj.flatten()))
-
-            # We store the class, to be able to distinguish between
-            # Objects with the same binary content, but different
-            # classes.
-            if self.coerce_mmap and isinstance(obj, self.np.memmap):
-                # We don't make the difference between memmap and
-                # normal ndarrays, to be able to reload previously
-                # computed results with memmap.
-                klass = self.np.ndarray
+        remap a numpy array to a representation which conserves
+        all semantically relevant information concerning memory aliasing
+        note that this mapping is 'destructive'; we will not get our original numpy arrays
+        back after unpickling. this is only meant to be used to obtain correct keying behavior
+        better to use a dummy class, to avoid key collisions
+        """
+        if isinstance(obj, self.np.ndarray):
+            if obj.flags.owndata:
+                obj = ndarray_own(obj)
             else:
-                klass = obj.__class__
-            # We also return the dtype and the shape, to distinguish
-            # different views on the same data with different dtypes.
+                obj = ndarray_view(obj)
+        DeterministicPickler.save(self, obj)
 
-            # The object will be pickled by the pickler hashed at the end.
-            obj = (klass, ('HASHED', obj.dtype, obj.shape, obj.strides))
-        Hasher.save(self, obj)
+
+
+
+##        if isinstance(obj, self.np.ndarray) and not obj.dtype.hasobject:
+##            # Compute a hash of the object:
+##            try:
+##                self._hash.update(self._getbuffer(obj))
+##            except (TypeError, BufferError, ValueError):
+##                # Cater for non-single-segment arrays: this creates a
+##                # copy, and thus aleviates this issue.
+##                # XXX: There might be a more efficient way of doing this
+##                # Python 3.2's memoryview raise a ValueError instead of a
+##                # TypeError or a BufferError
+##                self._hash.update(self._getbuffer(obj.flatten()))
+##
+##            # We store the class, to be able to distinguish between
+##            # Objects with the same binary content, but different
+##            # classes.
+##            if self.coerce_mmap and isinstance(obj, self.np.memmap):
+##                # We don't make the difference between memmap and
+##                # normal ndarrays, to be able to reload previously
+##                # computed results with memmap.
+##                klass = self.np.ndarray
+##            else:
+##                klass = obj.__class__
+##            # We also return the dtype and the shape, to distinguish
+##            # different views on the same data with different dtypes.
+##
+##            # The object will be pickled by the pickler hashed at the end.
+##            obj = (klass, ('HASHED', obj.dtype, obj.shape, obj.strides))
+##        DeterministicPickler.save(self, obj)
 
 def as_deterministic(obj):
 ##    return pickle.dumps(obj)
-    return DeterministicPickler().dumps(obj)
+    return NumpyDeterministicPickler().dumps(obj)
 
 
 

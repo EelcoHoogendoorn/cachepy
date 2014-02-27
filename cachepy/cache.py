@@ -357,8 +357,23 @@ if False:
     print compile('const {dtype} = {value};', dict(dtype='int',value=3))
     quit()
 
+if True:
 
+    @cached(connect_clear=True)
+    def foo(a,b):
+        b[0] = 1
+        return a[0]
 
+    a = np.zeros(1)
+    b = a[:]
+    print foo(a, b)    #computes and returns 1
+    print foo(a, b)    #gets 1 from cache
+
+    a = np.zeros(1)
+    b = np.zeros(1)
+    print foo(a, b)    #should compute and return 0 but instead gets 1 from cache
+
+    quit()
 
 
 class CompilationCache(AbstractCache):

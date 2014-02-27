@@ -33,17 +33,33 @@ class Dict(dict):
         self[key] = value
 
 
-class Wrapper(object):
+class CacheWrapper(object):
     """
     class which wraps a key-value mapping with several (optional) features:
         locking
         key serialization
         hierarchical keying scheme
+
+    shelve should act as a defaultdict(list)
+    it is keyed by a hash of the key
+    if exact is true, a key-value tuple is stored,
+    and keys are checked upon retrieval
+
+    create sqliteresultslist helper type?
+    demand a given interface
+    would like to be able to request a unique id for each key
+    for dict, this is id(key)
+    for sqlite, it is the rowid
+
+
+    we could memoize key serializations within the session
+
     """
 
-    def __init__(self, shelve, locking, deterministic, hierarchical, zip = True):
+    def __init__(self, shelve, locking, exact, deterministic, hierarchical, zip = True):
         self.shelve         = shelve
         self.locking        = locking
+        self.exact          = excact,
         self.deterministic  = deterministic
         self.hierarchical   = hierarchical
         aelf.zip            = True      #zip the key/value pickles. to be preferred for long term storage, but not for memoization
@@ -56,22 +72,24 @@ class Wrapper(object):
         self.encode = encode
 
 
+
+
 def select_mapping(
         local=True,         #if true, sqlite, else remote server
         ondisk=True,        #persistent disk based or per session in mem cache
+        readonly=False,     #whether writing keys is allowed
         locking='file',     #locking scheme used to regulate access for local ondisk backends
 
         hierarchical=False, #hierarchical key storage scheme
         determinstic=True,  #type of serialization. deterministic is slower, but necessary for pycc type caching
         exact=True,         #store full keys, or only their hashes
-        readonly=False,     #whether writing keys is allowed. this has implications for locking
         ):
     """
     select a key-value mapping with the appropriate chacteristics
     shelve2 is the most general implementation thus far,
     but there are many functionality/performance tradeoffs to be made
     """
-    if readonly: locking = None
+    if readonly or not local: locking = None
 
     if local and ondisk and determinstic and exact:
         import shelve2
