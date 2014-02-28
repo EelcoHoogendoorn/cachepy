@@ -153,14 +153,13 @@ class Partial(object):
 class AbstractCache(object):
     """
     abstract base class of a cache object which gracefully handles large arbitrary key objects
-
-    operation and environment methods must be overloaded
     """
     def __init__(
             self,
-            identifier          = None,     #name under which the cache file is stored. defaults to modulename.classname
-            environment         = None,     #object containing information regarding the dependencies of the cached operation
+            identifier          = None,     #name under which the cache file is stored. defaults to modulename.objname
+            environment         = None,     #object containing information regarding the dependencies on global state of the cached operation
             operation           = None,     #function to be cached. note that the order of arguments is significant for key reuse
+            hierarchy           = None,     #key hierarchy; if and how args and kwargs are hierarchically ordered
             validate            = False,    #validation mode. if enabled, all cache retrievals are checked against a recomputed function call.
             deferred_timeout    = 30,       #time to wait before a deferred object is considered obsolete. compilation may take a long time; that said, it may also crash your process...
             lock_timeout        = 1,        #time to wait before a lock is considered obsolete. the lock is needed for pure db transactions only; this makes once second a long time
@@ -172,6 +171,7 @@ class AbstractCache(object):
         """
         if identifier: self.identifier = identifier
         if operation: self.operation = operation
+        self.hierarchy = hierarchy
         #add some essentials to the environment
         import platform
         globalenv               = platform.architecture(), platform.python_version()
@@ -188,10 +188,10 @@ class AbstractCache(object):
         self.lock               = threading.Lock()
         self.lock_file          = lockfile.MkdirLockFile(self.filename, timeout = lock_timeout)
 
-        with self.lock_file:
+        with self.lock, self.lock_file:
             if connect_clear:
                 #this isnt right; we are now invalidating the precomputed envrowid of other processes...
-                self.shelve.clear()           #write lock
+                self.shelve.clear()           #need write lock here
 
             #write environment key to database and obtain its unique rowid
             try:
@@ -199,7 +199,7 @@ class AbstractCache(object):
             except:
                 #connect to the db with a novel environment; probably wont change back again
                 if environment_clear:
-                    self.shelve.clear()         #write lock
+                    self.shelve.clear()         #need write lock here
                 self.shelve.setitem(self.environment, None, estr, ehash)
                 self.envrowid = self.shelve.getrowid(self.environment, estr, ehash)
 
@@ -211,8 +211,14 @@ class AbstractCache(object):
         look up a hierachical key object
         fill in the missing parts, and perform the computation at the leaf if so required
         """
-        #kwargs are last subkey. is this optimal?
-        hkey = args + ((kwargs,) if kwargs else ())
+        if self.hierarchy:
+            #apply the structure in hierarchy to the arguments
+            fkey = kwargs.copy()
+            fkey.update(enumerate(args))
+            hkey = [[fkey.pop(a) for a in level] for level in self.hierarchy]
+            if fkey: hkey.append(fkey)  #any arguments not part of the hierarchy spec are placed at the end
+        else:
+            hkey = [args + ((kwargs,) if kwargs else ())]   #put all args in a single key
         #preprocess subkeys. this minimizes time spent in locked state
         hkey = map(as_deterministic, hkey)
 
@@ -239,7 +245,23 @@ class AbstractCache(object):
                         if self.validate:
                             #check if recomputed value is identical under deterministic serialization
                             newvalue = self.operation(*args, **kwargs)
-                            assert(as_deterministic(value)==as_deterministic(newvalue))
+
+                            try:
+                                #note; new may differ from old in case aliasing in an ndarray was erased
+                                #by original serialization. is this an error?
+                                #id say so; depending on wether we have a cache hit, downstream code may react diffently
+                                #perhaps its best to use custom serializating for values too
+                                assert(as_deterministic(value)==as_deterministic(newvalue))
+                            except:
+                                print 'Cache returned invalid value!'
+                                print 'arguments:'
+                                print args
+                                print kwargs
+                                print 'cached value'
+                                print value
+                                print 'recomputed value'
+                                print newvalue
+                                quit()
 
                         #yes! hitting this return is what we are doing this all for!
                         return value
@@ -347,7 +369,7 @@ import numpy as np
 
 
 if False:
-    @cached(connect_clear=True)
+    @cached(connect_clear=False, hierarchy=[[0],[1]])
     def compile(source, templates):
         print 'compiling'
         sleep(1)
@@ -359,7 +381,7 @@ if False:
 
 if True:
 
-    @cached(connect_clear=True)
+    @cached(connect_clear=True, validate=True)
     def foo(a,b):
         b[0] = 1
         return a[0]
@@ -419,7 +441,6 @@ cache = CompilationCache(connect_clear=True)
 ##        informal_version = [inspect.getsource(file) for file in files]
 ##
 ##        return version, informal_version, 999
-
 
 
 def worker(arg):

@@ -5,6 +5,7 @@ the problem which this module solves is that
 dumps({1: 0, 9: 0}) != dumps({9: 0, 1: 0})
 using as_deterministic instead of dumps, we are good
 
+
 code adapted from joblib, as indicated below
 
 one weakness i have found so far is that numpy array view relationships are flattend
@@ -35,12 +36,14 @@ else:
     Pickler = pickle._Pickler
 
 
-class _ConsistentSet(object):
-    """ Class used to ensure the hash of Sets is preserved
-        whatever the order of its items.
+
+class _DeterministicSet(object):
     """
-    def __init__(self, set_sequence):
-        self._sequence = sorted(set_sequence)
+    determinstic pickling of a set (set or frozenset)
+    """
+    def __init__(self, obj):
+        self._sequence = sorted(obj)
+        self.type = type(obj)
 
 
 class _MyHash(object):
@@ -68,7 +71,7 @@ class DeterministicPickler(Pickler):
         return str(self.stream.getvalue())
 
     def save(self, obj):
-        if isinstance(obj, (types.MethodType, type({}.pop))):
+        if isinstance(obj, (types.MethodType, types.BuiltinFunctionType)):
             # the Pickler cannot pickle instance methods; here we decompose
             # them into components that make them uniquely identifiable
             if hasattr(obj, '__func__'):
@@ -124,23 +127,25 @@ class DeterministicPickler(Pickler):
         # forces order of keys in dict to ensure consistent hash
         Pickler._batch_setitems(self, iter(sorted(items)))
 
-    def save_set(self, set_items):
+    def save_set(self, obj):
         # forces order of items in Set to ensure consistent hash
-        Pickler.save(self, _ConsistentSet(set_items))
+        Pickler.save(self, _DeterministicSet(obj))
 
-    dispatch[type(set())] = save_set
+    dispatch[type(set())]       = save_set
+    dispatch[type(frozenset())] = save_set
 
 
 
 import numpy as np
-class ndarray_own(object):
+#dummy classes to pickle numpy.ndarrays in a manner that conserves aliasing information
+class _ndarray_own(object):
     def __init__(self, arr):
         self.buffer     = np.getbuffer(arr)
         self.dtype      = arr.dtype
         self.shape      = arr.shape
         self.strides    = arr.strides
 
-class ndarray_view(object):
+class _ndarray_view(object):
     def __init__(self, arr):
         self.base       = arr.base
         self.offset     = self.base.ctypes.data - arr.ctypes.data   #so we have a view; but where is it?
@@ -170,25 +175,22 @@ class NumpyDeterministicPickler(DeterministicPickler):
         DeterministicPickler.__init__(self)
         # delayed import of numpy, to avoid tight coupling
         import numpy as np
-        self.np = np
-        if hasattr(np, 'getbuffer'):
-            self._getbuffer = np.getbuffer
-        else:
-            self._getbuffer = memoryview
+
 
     def save(self, obj):
         """
         remap a numpy array to a representation which conserves
         all semantically relevant information concerning memory aliasing
         note that this mapping is 'destructive'; we will not get our original numpy arrays
-        back after unpickling. this is only meant to be used to obtain correct keying behavior
-        better to use a dummy class, to avoid key collisions
+        back after unpickling; not without custom deserialization code at least
+        but we dont care, since this is only meant to be used to obtain correct keying behavior
+        keys dont need to be deserialized
         """
-        if isinstance(obj, self.np.ndarray):
+        if isinstance(obj, np.ndarray):
             if obj.flags.owndata:
-                obj = ndarray_own(obj)
+                obj = _ndarray_own(obj)
             else:
-                obj = ndarray_view(obj)
+                obj = _ndarray_view(obj)
         DeterministicPickler.save(self, obj)
 
 
